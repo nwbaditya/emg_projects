@@ -18,6 +18,8 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
+#include "tim.h"
 #include "usb_device.h"
 #include "gpio.h"
 
@@ -25,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "string.h"
 #include "usbd_cdc_if.h"
+#include "FIRFilter.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,7 +47,8 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-float value = 0.0f;
+int emg_raw;
+FIRFilter bpf_acc;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -87,8 +91,12 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USB_DEVICE_Init();
+  MX_TIM10_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
+  HAL_TIM_Base_Start_IT(&htim10);
 
+  FIRFilter_Init(&bpf_acc);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -98,13 +106,13 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  char logbuf[128];
-	  for(float i = 0; i < 2000; i+=0.05){
-		  value = i;
-		  sprintf(logbuf, "%.2f\r\n", value);
-		  HAL_Delay(10);
-		  CDC_Transmit_FS((uint8_t*)logbuf, strlen(logbuf));
-	  }
+//	  char logbuf[128];
+//	  for(float i = 0; i < 2000; i+=0.05){
+//		  value = i;
+//		  sprintf(logbuf, "%.2f\r\n", value);
+//		  HAL_Delay(10);
+//		  CDC_Transmit_FS((uint8_t*)logbuf, strlen(logbuf));
+//	  }
   }
   /* USER CODE END 3 */
 }
@@ -155,7 +163,22 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim){
+	if(htim->Instance == TIM10){
+		HAL_ADC_Start_IT(&hadc1);
+		FIRFilter_Update(&bpf_acc, emg_raw);
+		char logbuf[1024];
+		sprintf(logbuf, "%d,%.4f\r\n", emg_raw, bpf_acc.out);
+		CDC_Transmit_FS((uint8_t*)logbuf, strlen(logbuf));
+	}
+}
 
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+{
+	emg_raw = HAL_ADC_GetValue(&hadc1);
+  /*If continuousconversion mode is DISABLED uncomment below*/
+//  HAL_ADC_Start_IT (&hadc1);
+}
 /* USER CODE END 4 */
 
 /**
