@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
+#include "i2c.h"
 #include "tim.h"
 #include "usb_device.h"
 #include "gpio.h"
@@ -26,17 +27,28 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "string.h"
+#include "stdbool.h"
+#include "math.h"
 #include "usbd_cdc_if.h"
+//#include "arm_math.h"
 #include "FIRFilter.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+#define SIGNAL_SAMPLES_LENGTH 100
 
+typedef struct{
+	float buf[SIGNAL_SAMPLES_LENGTH];
+	uint8_t bufIndex;
+
+	float energy;
+}SignalFeature_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define ARM_THRESHOLD 	0.7
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -47,8 +59,30 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-int emg_raw;
-FIRFilter bpf_acc;
+uint16_t emg_raw;
+uint8_t arm_state = 0;
+uint8_t calibration_counter = 0;
+int16_t arm_minimum_signal;
+uint8_t arm_minimum_signal_is_captured = 0;
+int16_t arm_maximum_signal;
+float signal_energy;
+
+float sum_normalized_arm_signalsqr;
+uint8_t signal_energy_cnt_length = 0;
+uint8_t signal_energy_length = 100; //sample 100
+float normalized_arm_signal;
+float emg_rawbfr;
+float emg_rawdiff;
+
+uint8_t truth_counter_maxval = 75;
+uint8_t truth_counter_thresh;
+bool prosthetic_state = false;
+bool prosthetic_statebfr;
+int arm_condition_thresh = 120;
+
+FIRFilter mav;
+SignalFeature_t sig;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -59,7 +93,48 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void Signal_Buf_Init(SignalFeature_t *signal){
+	//Clear Filter Buffer
+	for(uint8_t n = 0; n < SIGNAL_SAMPLES_LENGTH; n++){
+		signal->buf[n] = 0.0f;
+	}
 
+	//Clear Buf Index
+	signal->bufIndex = 0;
+
+	//Clear Filter Output
+	signal->energy = 0.0f;
+}
+
+void Signal_Buf_Update(SignalFeature_t *signal, float inp){
+	/*Store Latest Sample in buffer */
+	signal->buf[signal->bufIndex] = inp;
+
+	/*increment buffer index and wrap around if necessary*/
+	signal->bufIndex++;
+
+	if(signal->bufIndex == SIGNAL_SAMPLES_LENGTH){
+		signal->bufIndex = 0;
+	}
+}
+
+float Signal_Energy_Calculate(SignalFeature_t *signal){
+	signal->energy = 0.0f;
+
+	uint8_t sumIndex = signal->bufIndex;
+	for(uint8_t n = 0; n < SIGNAL_SAMPLES_LENGTH; n++){
+		/*Decrement Index and Wrap if Necessary*/
+		if(sumIndex < SIGNAL_SAMPLES_LENGTH -1){
+			sumIndex++;
+		}else{
+			sumIndex = 0;
+		}
+
+		/*Multiply Impulse Response with Shifted input sample and add to output*/
+		signal->energy += (signal->buf[n] * signal->buf[n]);
+	}
+	return signal->energy;
+}
 /* USER CODE END 0 */
 
 /**
@@ -93,26 +168,28 @@ int main(void)
   MX_USB_DEVICE_Init();
   MX_TIM10_Init();
   MX_ADC1_Init();
+  MX_TIM9_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start_IT(&htim10);
+  HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_1);
 
-  FIRFilter_Init(&bpf_acc);
+  FIRFilter_Init(&mav);
+  Signal_Buf_Init(&sig);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  if(arm_state == 1){
+		  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 2000);
+	  }else{
+		  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 1500);
+	  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-//	  char logbuf[128];
-//	  for(float i = 0; i < 2000; i+=0.05){
-//		  value = i;
-//		  sprintf(logbuf, "%.2f\r\n", value);
-//		  HAL_Delay(10);
-//		  CDC_Transmit_FS((uint8_t*)logbuf, strlen(logbuf));
-//	  }
   }
   /* USER CODE END 3 */
 }
@@ -166,18 +243,57 @@ void SystemClock_Config(void)
 void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim){
 	if(htim->Instance == TIM10){
 		HAL_ADC_Start_IT(&hadc1);
-		FIRFilter_Update(&bpf_acc, emg_raw);
 		char logbuf[1024];
-		sprintf(logbuf, "%d,%.4f\r\n", emg_raw, bpf_acc.out);
+		FIRFilter_Update(&mav, emg_raw);
+
+//		emg_rawdiff = mav.out - emg_rawbfr;
+		emg_rawdiff = emg_raw - emg_rawbfr;
+//		emg_rawdiff = abs(emg_rawdiff);
+		if(emg_rawdiff < 0){
+			emg_rawdiff = emg_rawdiff * -1;
+		}
+		Signal_Buf_Update(&sig, emg_rawdiff);
+		Signal_Energy_Calculate(&sig);
+
+		if(sig.energy > arm_condition_thresh){
+			if(prosthetic_statebfr == true){
+				truth_counter_thresh++;
+				if(truth_counter_thresh >= truth_counter_maxval){
+					prosthetic_state = true;
+					arm_state = 1;
+					truth_counter_thresh = 0;
+				}
+			}
+			prosthetic_statebfr = true;
+		}else{
+			if(prosthetic_statebfr == false){
+				truth_counter_thresh++;
+				if(truth_counter_thresh >= truth_counter_maxval){
+					prosthetic_state = false;
+					arm_state = 0;
+					truth_counter_thresh = 0;
+				}
+			}
+			prosthetic_statebfr = false;
+		}
+
+		sprintf(logbuf, "%d,%.2f,%.2f\r\n", emg_raw, emg_rawdiff, sig.energy);
 		CDC_Transmit_FS((uint8_t*)logbuf, strlen(logbuf));
+
+//		emg_rawbfr = mav.out;
+		emg_rawbfr = emg_raw;
 	}
 }
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
 	emg_raw = HAL_ADC_GetValue(&hadc1);
-  /*If continuousconversion mode is DISABLED uncomment below*/
-//  HAL_ADC_Start_IT (&hadc1);
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
+	if(GPIO_Pin == GPIO_PIN_0){
+		calibration_counter++;
+	}
 }
 /* USER CODE END 4 */
 
