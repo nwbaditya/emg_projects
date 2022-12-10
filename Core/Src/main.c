@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
+#include "dma.h"
 #include "i2c.h"
 #include "tim.h"
 #include "usb_device.h"
@@ -32,6 +33,7 @@
 #include "usbd_cdc_if.h"
 //#include "arm_math.h"
 #include "FIRFilter.h"
+#include "pid.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -59,8 +61,12 @@ typedef struct{
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+uint32_t adc[2], adc_buffer[2];
+int fsr;
+int arm_pressure;
 uint16_t emg_raw;
 uint8_t arm_state = 0;
+uint8_t arm_state_manual = 0;
 uint8_t calibration_counter = 0;
 int16_t arm_minimum_signal;
 uint8_t arm_minimum_signal_is_captured = 0;
@@ -80,9 +86,18 @@ bool prosthetic_state = false;
 bool prosthetic_statebfr;
 int arm_condition_thresh = 120;
 
+float kp = 0.45;
+float ti = 0.1;
+float td = 0.01;
+float dt = 0.0005;
+float pid_out;
+
+
 FIRFilter mav;
 SignalFeature_t sig;
+PID_t pid;
 
+int servo_pwm = 1500;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -144,7 +159,7 @@ float Signal_Energy_Calculate(SignalFeature_t *signal){
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+   PID_Init(&pid, kp, ti, td, dt);
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -165,6 +180,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USB_DEVICE_Init();
   MX_TIM10_Init();
   MX_ADC1_Init();
@@ -173,20 +189,26 @@ int main(void)
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start_IT(&htim10);
   HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_1);
+  HAL_ADC_Start_DMA(&hadc1, adc_buffer, 2);
 
   FIRFilter_Init(&mav);
   Signal_Buf_Init(&sig);
+//  PID_Init(&pid, kp, ti, td, dt);
+//  pid.kp = kp;
+//  pid.ti = ti;
+//  pid.td = td;
+//  pid.dt = dt;
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  if(arm_state == 1){
-		  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 2000);
-	  }else{
-		  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 1500);
-	  }
+//	  if(arm_state == 1){
+//		  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 2000);
+//	  }else{
+//		  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 1500);
+//	  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -242,9 +264,23 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim){
 	if(htim->Instance == TIM10){
-		HAL_ADC_Start_IT(&hadc1);
+//		__HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, servo_pwm);
+
 		char logbuf[1024];
 		FIRFilter_Update(&mav, emg_raw);
+		pid_out = PID_Update(&pid, arm_pressure, fsr);
+
+		if(pid_out > 2000){
+			pid_out = 2000;
+		}else if(pid_out < 1000){
+			pid_out = 1000;
+		}
+
+		if(arm_state_manual == 1){
+		  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, pid_out);
+		}else{
+		  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 1000);
+		}
 
 //		emg_rawdiff = mav.out - emg_rawbfr;
 		emg_rawdiff = emg_raw - emg_rawbfr;
@@ -277,7 +313,8 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim){
 			prosthetic_statebfr = false;
 		}
 
-		sprintf(logbuf, "%d,%.2f,%.2f\r\n", emg_raw, emg_rawdiff, sig.energy);
+//		sprintf(logbuf, "%.2f,%d,%.2f,%.2f\r\n",emg_raw, fsr, arm_pressure, pid_out);
+		sprintf(logbuf, "%d,%d,%.2f\r\n", arm_pressure,fsr, pid_out);
 		CDC_Transmit_FS((uint8_t*)logbuf, strlen(logbuf));
 
 //		emg_rawbfr = mav.out;
@@ -287,7 +324,11 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim){
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
-	emg_raw = HAL_ADC_GetValue(&hadc1);
+	for(int i =0; i < 2; i++){
+		adc[i] = adc_buffer[i];
+	}
+	emg_raw = adc[0];
+	fsr = adc[1];
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
