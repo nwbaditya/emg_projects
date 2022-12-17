@@ -61,8 +61,8 @@ typedef struct{
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-uint32_t adc[2], adc_buffer[2];
-int fsr;
+uint32_t adc[3], adc_buffer[3];
+int fsr[2];
 int arm_pressure;
 uint16_t emg_raw;
 uint8_t arm_state = 0;
@@ -91,6 +91,7 @@ float ti = 0.1;
 float td = 0.01;
 float dt = 0.0005;
 float pid_out;
+float pid_out_clamped;
 
 
 FIRFilter mav;
@@ -159,7 +160,8 @@ float Signal_Energy_Calculate(SignalFeature_t *signal){
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-   PID_Init(&pid, kp, ti, td, dt);
+
+	PID_Init(&pid, kp, ti, td, dt);
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -189,7 +191,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start_IT(&htim10);
   HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_1);
-  HAL_ADC_Start_DMA(&hadc1, adc_buffer, 2);
+  HAL_ADC_Start_DMA(&hadc1, adc_buffer, 3);
 
   FIRFilter_Init(&mav);
   Signal_Buf_Init(&sig);
@@ -268,16 +270,17 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim){
 
 		char logbuf[1024];
 		FIRFilter_Update(&mav, emg_raw);
-		pid_out = PID_Update(&pid, arm_pressure, fsr);
+		pid_out = PID_Update(&pid, arm_pressure, fsr[0]) + 1500;
+		pid_out_clamped = pid_out;
 
 		if(pid_out > 2000){
-			pid_out = 2000;
+			pid_out_clamped = 2000;
 		}else if(pid_out < 1000){
-			pid_out = 1000;
+			pid_out_clamped = 1000;
 		}
 
 		if(arm_state_manual == 1){
-		  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, pid_out);
+		  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, pid_out_clamped);
 		}else{
 		  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 1000);
 		}
@@ -314,7 +317,7 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim){
 		}
 
 //		sprintf(logbuf, "%.2f,%d,%.2f,%.2f\r\n",emg_raw, fsr, arm_pressure, pid_out);
-		sprintf(logbuf, "%d,%d,%.2f\r\n", arm_pressure,fsr, pid_out);
+		sprintf(logbuf, "%d,%d,%d\r\n",emg_raw, fsr[0], fsr[1]);
 		CDC_Transmit_FS((uint8_t*)logbuf, strlen(logbuf));
 
 //		emg_rawbfr = mav.out;
@@ -324,11 +327,13 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim){
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
-	for(int i =0; i < 2; i++){
+	for(int i =0; i < 3; i++){
 		adc[i] = adc_buffer[i];
 	}
 	emg_raw = adc[0];
-	fsr = adc[1];
+	fsr[0] = adc[1];
+	fsr[1] = adc[2];
+
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
