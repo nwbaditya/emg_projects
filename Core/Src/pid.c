@@ -22,21 +22,26 @@ void PID_Init(PID_t *pid, float _kp, float _ti, float _td, float _dt){
 	pid->dt = _dt;
 }
 
-float PID_Update(PID_t *pid, int reference, int input){
+float PID_Update(PID_t *pid, float reference, float input){
 	float out;
 	pid->e_now = reference - input;
 	pid->de = pid->e_now - pid->e_prev;
 
 	pid->p = pid->kp * pid->e_now;
 	pid->i = pid->i + (pid->e_now * pid->dt);
-	if(pid->i > 1000){
-		pid->i = 1000;
-	}else if(pid->i < -1000){
-		pid->i = -1000;
+	if(pid->i > 300){
+		pid->i = 300;
+	}else if(pid->i < -300){
+		pid->i = -300;
 	}
 	pid->d = pid->de / pid->dt;
 
 	out = pid->kp * (pid->p + (1 / pid->ti) * pid->i + pid->td * pid->d);
+	if(out < -500){
+		out = -500;
+	}else if(out > 500){
+		out = 500;
+	}
 	pid->e_prev = pid->e_now;
 	return out;
 }

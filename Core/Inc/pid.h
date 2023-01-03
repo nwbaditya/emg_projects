@@ -25,6 +25,6 @@ typedef struct{
 }PID_t;
 
 void PID_Init(PID_t *pid, float _kp, float _ti, float _td, float _dt);
-float PID_Update(PID_t *pid, int reference, int input);
+float PID_Update(PID_t *pid, float reference, float input);
 
 #endif /* INC_PID_H_ */
