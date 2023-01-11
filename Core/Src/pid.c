@@ -29,10 +29,10 @@ float PID_Update(PID_t *pid, float reference, float input){
 
 	pid->p = pid->kp * pid->e_now;
 	pid->i = pid->i + (pid->e_now * pid->dt);
-	if(pid->i > 300){
-		pid->i = 300;
-	}else if(pid->i < -300){
-		pid->i = -300;
+	if(pid->i > 500){
+		pid->i = 500;
+	}else if(pid->i < -500){
+		pid->i = -500;
 	}
 	pid->d = pid->de / pid->dt;
 

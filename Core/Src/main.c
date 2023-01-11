@@ -68,10 +68,12 @@ int sum_fsr;
 float sum_fsr_voltage;
 float sum_fsr_force;
 
-float arm_force_setpoint = 0.7;
+float arm_force_setpoint = 1.0;
 uint16_t emg_raw;
+float emg_raw_voltage;
 int emg_rmv_offset;
-int emg_offset;
+float emg_rmv_offset_voltage;
+int emg_offset = 1330;
 float emg_offset_volt = 0;
 
 uint8_t arm_state = 0;
@@ -81,13 +83,13 @@ float signal_rms;
 float signal_rms_voltage;
 float signal_power;
 float normalized_signal_rms;
-float normalized_signal_thresh = 0.2;
+float normalized_signal_thresh = 20;
 
 uint8_t get_mvc_flag;
 uint16_t get_mvc_counter_maxval = 1000;
-uint16_t get_mvc_counter = 0;
+uint32_t get_mvc_counter = 0;
 uint8_t ever_get_mvc = 0;
-float mvc_voltage = 0;
+float mvc_voltage;
 float mvc_sum;
 
 uint8_t truth_counter_maxval = 50;
@@ -96,9 +98,9 @@ uint16_t truth_counter_thresh;
 bool prosthetic_state = false;
 bool prosthetic_statebfr;
 
-float kp = 0.4;
-float ti = 0.05;
-float td = 0.001;
+float kp = 1;
+float ti = 0.01;
+float td = 0.1;
 float dt = 0.0005;
 
 SignalFeature_t sig;
@@ -108,8 +110,10 @@ int servo_pwm = 1000;
 
 char usbd_buf_recv[128];
 char *array[2];
-int parsedBuf[2];
+float parsedBuf[2];
 uint8_t device_status = 0;
+
+int cnt;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -178,8 +182,7 @@ float Signal_RMS_Calculate(SignalFeature_t *signal){
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
-	PID_Init(&pid, kp, ti, td, dt);
+  	PID_Init(&pid, kp, ti, td, dt);
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -218,6 +221,10 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+		char logbuf[256];
+//		sprintf(logbuf, "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\r\n",signal_rms_voltage, normalized_signal_thresh, arm_force_setpoint, sum_fsr_force, normalized_signal_rms, mvc_voltage, emg_raw_voltage);
+		sprintf(logbuf, "%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,\r\n", arm_state, mvc_voltage, normalized_signal_thresh, emg_rmv_offset_voltage, signal_rms_voltage, normalized_signal_rms, arm_force_setpoint,sum_fsr_force);
+		CDC_Transmit_FS((uint8_t*)logbuf, strlen(logbuf));
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -273,7 +280,7 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim){
 	if(htim->Instance == TIM10){
-		char logbuf[512];
+//		char logbuf[256];
 
 		uint8_t i = 0;
 		char *p = strtok(usbd_buf_recv, ",");
@@ -290,19 +297,34 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim){
 		if(parsedBuf[0] == 1){
 			device_status = parsedBuf[1];
 		}else if(parsedBuf[0] == 2){
-			emg_offset = (parsedBuf[1]/3.3)*4096;
+			int value = parsedBuf[1];
+			emg_offset_volt = (float)value / 1000;
+//			emg_offset_volt = parsedBuf[1];
+			emg_offset = (emg_offset_volt*4096/3.3);
 		}else if(parsedBuf[0] == 3){
-			normalized_signal_thresh = parsedBuf[1];
+			int value = parsedBuf[1];
+			normalized_signal_thresh = (float)value / 1000;
+//			normalized_signal_thresh = parsedBuf[1];
+		}else if(parsedBuf[0] == 4){
+			int value = (int)parsedBuf[1];
+			get_mvc_flag = (uint8_t)value;
 		}
-
 		memset(usbd_buf_recv, NULL, sizeof(usbd_buf_recv));
 
+		fsr_volt[0] = ((float)fsr[0]/4096)*3.3;
+		fsr_volt[1] = ((float)fsr[1]/4096)*3.3;
+
+		fsr_force[0] = 0.5287*fsr_volt[0] + 0.1773;
+		fsr_force[1] = 0.5287*fsr_volt[1] + 0.1773;
+
 		emg_rmv_offset = emg_raw - emg_offset;
+		emg_rmv_offset_voltage = emg_rmv_offset * 3.3 / 4096;
 		Signal_Buf_Update(&sig, emg_rmv_offset);
 		Signal_RMS_Calculate(&sig);
 
 		signal_rms = sig.rms;
 		signal_rms_voltage = (signal_rms/4096)*3.3;
+
 		if(get_mvc_flag == 1){
 			if(get_mvc_counter < get_mvc_counter_maxval){
 				mvc_sum += signal_rms_voltage;
@@ -328,7 +350,8 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim){
 		sum_fsr_force = fsr_force[0] + fsr_force[1];
 
 
-		servo_pwm = PID_Update(&pid, arm_force_setpoint, sum_fsr) + 1500;
+		servo_pwm = PID_Update(&pid, arm_force_setpoint, sum_fsr_force) + 1500;
+		cnt++;
 
 		if(normalized_signal_rms > normalized_signal_thresh){
 			if(prosthetic_statebfr == true){
@@ -346,6 +369,7 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim){
 				if(truth_counter_thresh >= truth_counter_maxval_arm_closed){
 					prosthetic_state = false;
 					arm_state = 0;
+					pid.i = 0;
 					truth_counter_thresh = 0;
 				}
 			}
@@ -359,10 +383,11 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim){
 		}else{
 			__HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 1000);
 		}
-
-		sprintf(logbuf, "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\r\n",signal_rms_voltage, normalized_signal_thresh, arm_force_setpoint, fsr_force, normalized_signal_rms, mvc_voltage);
-//		sprintf(logbuf, "%d,%.2f,%.2f,%d,%.2f\r\n", emg_raw, sig.rms, pid_out, sum_fsr, pid_out_clamped);
-		CDC_Transmit_FS((uint8_t*)logbuf, strlen(logbuf));
+//For EMG Program
+//		sprintf(logbuf, "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\r\n",signal_rms_voltage, normalized_signal_thresh, arm_force_setpoint, sum_fsr_force, normalized_signal_rms, mvc_voltage, emg_raw_voltage);
+//For Serial oscilloscope
+//		sprintf(logbuf, "%.3f,%.3f,%.3f,%.3f,%.3f\r\n",signal_rms_voltage, normalized_signal_thresh, arm_force_setpoint, sum_fsr_force, arm_force_setpoint);
+//		CDC_Transmit_FS((uint8_t*)logbuf, strlen(logbuf));
 	}
 }
 
@@ -372,20 +397,14 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 		adc[i] = adc_buffer[i];
 	}
 	emg_raw = adc[0];
+	emg_raw_voltage = (emg_raw*3.3/4096);
 	fsr[0] = adc[1];
 	fsr[1] = adc[2];
-
-	fsr_volt[0] = (fsr[0]/4096)*3.3;
-	fsr_volt[1] = (fsr[1]/4096)*3.3;
-
-	fsr_force[0] = 0.5287*fsr_volt[0] + 0.1773;
-	fsr_force[1] = 0.5287*fsr_volt[1] + 0.1773;
-
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 	if(GPIO_Pin == GPIO_PIN_0){
-
+		get_mvc_flag = 1;
 	}
 }
 /* USER CODE END 4 */
